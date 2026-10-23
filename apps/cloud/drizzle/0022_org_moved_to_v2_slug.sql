@@ -12,16 +12,20 @@ ALTER TABLE "org_moved_to_v2" ADD CONSTRAINT "org_moved_to_v2_state_check" CHECK
 --     v2_org_id = excluded.v2_org_id, v2_org_slug = excluded.v2_org_slug
 -- which needs INSERT and UPDATE on the table and SELECT on the columns the
 -- upsert names (the conflict target and the `excluded` reads). It gets nothing
--- else: no DELETE, no SELECT of `updated_at`, nothing on any other table.
+-- else: no DELETE, no SELECT of `updated_at`, nothing on any other table, and
+-- only USAGE on the schema, which PlanetScale does not give PUBLIC.
 --
 -- The grant runs only when the role already exists. When the role is created
--- after this migration has run, run these two statements once, after
+-- after this migration has run, run these three statements once, after
 -- `CREATE ROLE v1_import_writer ...`:
+--   GRANT USAGE ON SCHEMA public TO v1_import_writer;
 --   GRANT INSERT, UPDATE ON org_moved_to_v2 TO v1_import_writer;
 --   GRANT SELECT (org_id, state, v2_org_id, v2_org_slug) ON org_moved_to_v2 TO v1_import_writer;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'v1_import_writer') THEN
+    -- PlanetScale gives PUBLIC no USAGE on `public`, so the role needs its own.
+    GRANT USAGE ON SCHEMA public TO v1_import_writer;
     GRANT INSERT, UPDATE ON org_moved_to_v2 TO v1_import_writer;
     GRANT SELECT (org_id, state, v2_org_id, v2_org_slug) ON org_moved_to_v2 TO v1_import_writer;
   END IF;
