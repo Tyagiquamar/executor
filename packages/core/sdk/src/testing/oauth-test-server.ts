@@ -77,6 +77,10 @@ export interface OAuthTestServerOptions {
    *  registered client registered for, answering `invalid_scope` the way
    *  Mercury does. Omit to authorize any scope, the default. */
   readonly enforceRegisteredScopes?: boolean;
+  /** Register a dynamically registered client only for the requested scopes
+   *  in this list, answering the narrowed set as the registration's `scope`
+   *  (RFC 7591 §3.2.1). Omit to register every requested scope, the default. */
+  readonly registrableScopes?: readonly string[];
   readonly invalidRefreshTokenDescription?: string;
   /** RFC 6749 error code returned when a refresh-token grant is rejected.
    *  Defaults to `invalid_grant`; set to e.g. `invalid_request` to mirror
@@ -713,7 +717,14 @@ export const serveOAuthTestServer = (
               "The provided redirect URIs are not approved for use by this authorization server.",
             );
           }
-          const registeredScope = typeof json.scope === "string" ? json.scope : scopes.join(" ");
+          const requestedScope = typeof json.scope === "string" ? json.scope : scopes.join(" ");
+          const registeredScope =
+            options.registrableScopes === undefined
+              ? requestedScope
+              : requestedScope
+                  .split(/\s+/)
+                  .filter((scope) => options.registrableScopes!.includes(scope))
+                  .join(" ");
           clients.set(clientId, {
             clientSecret,
             redirectUris,

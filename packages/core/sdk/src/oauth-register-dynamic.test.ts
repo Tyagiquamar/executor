@@ -441,6 +441,7 @@ describe("oauth.registerDynamicClient", () => {
                 origin_kind: "dynamic_client_registration",
                 origin_integration: null,
                 origin_issuer: probe.issuer,
+                origin_requested_scopes: "read",
                 origin_scopes: "read",
               },
             }),

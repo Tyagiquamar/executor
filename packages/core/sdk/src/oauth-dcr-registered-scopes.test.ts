@@ -47,11 +47,17 @@ const scopePlugin = (oauth: AuthMethodDescriptor["oauth"]) =>
     }),
   }))();
 
-const setup = (options: { readonly declaredScopes?: readonly string[] }) =>
+const setup = (options: {
+  readonly declaredScopes?: readonly string[];
+  readonly registrableScopes?: readonly string[];
+}) =>
   Effect.gen(function* () {
     const server = yield* serveOAuthTestServer({
       scopes: ["read", "write"],
       enforceRegisteredScopes: true,
+      ...(options.registrableScopes === undefined
+        ? {}
+        : { registrableScopes: options.registrableScopes }),
     });
     const plugins = [
       memoryCredentialsPlugin(),
@@ -146,7 +152,7 @@ describe("DCR registered scopes", () => {
         yield* Effect.promise(() =>
           config.db.updateMany("oauth_client", {
             where: (b) => b("slug", "=", String(legacy)),
-            set: { origin_scopes: null },
+            set: { origin_requested_scopes: null, origin_scopes: null },
           }),
         );
         yield* server.clearRequests;
@@ -154,6 +160,47 @@ describe("DCR registered scopes", () => {
         const registered = yield* register(["read"]);
         expect(registerRequestCount(yield* server.requests)).toBe(1);
         expect(String(registered)).not.toBe(String(legacy));
+      }),
+    ),
+  );
+
+  it.effect("start narrows to the scopes the server registered, not the ones asked for", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // The server registers only `read` though the client asked for both.
+        const { executor, server, register, start } = yield* setup({
+          registrableScopes: ["read"],
+        });
+        const client = yield* register(["read", "write"]);
+
+        const started = yield* start(client);
+        expect(started.status).toBe("redirect");
+        if (started.status !== "redirect") return;
+        expect(scopesFromAuthorizeUrl(started.authorizationUrl)).toEqual(["read"]);
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        const connection = yield* executor.oauth.complete({
+          state: started.state,
+          code: callback.code,
+        });
+        expect(connection.oauthScope).toBe("read");
+      }),
+    ),
+  );
+
+  it.effect("reuses a narrowed registration instead of registering again on reconnect", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { server, register } = yield* setup({ registrableScopes: ["read"] });
+        const original = yield* register(["read", "write"]);
+        yield* server.clearRequests;
+
+        // Registering again would be narrowed the same way, so the client that
+        // already asked for these scopes is reused.
+        const reused = yield* register(["read", "write"]);
+        expect(registerRequestCount(yield* server.requests)).toBe(0);
+        expect(String(reused)).toBe(String(original));
       }),
     ),
   );
