@@ -571,7 +571,15 @@ interface LoadedOAuthClient {
   readonly resource: string | null;
   readonly tokenEndpointAuthMethod?: TokenEndpointAuthMethod;
   readonly tokenRequestFormat?: "form" | "json";
+  /** The scopes a DCR client registered for, when its registration recorded
+   *  any. A server may refuse an authorize request for a scope outside them. */
+  readonly registeredScopes?: readonly string[];
 }
+
+/** Parse a stored `origin_scopes` value: null when none was recorded, an empty
+ *  list when the registration sent no `scope`. */
+const parseStoredScopes = (value: unknown): readonly string[] | null =>
+  value == null ? null : String(value).split(/\s+/).filter(Boolean);
 
 /** Provider lifecycle scopes that are required to keep an authorization-code
  *  connection renewable but are omitted from the protected resource's API
@@ -1045,6 +1053,10 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                 input.origin?.kind === "dynamic_client_registration"
                   ? (input.originRedirectUri ?? null)
                   : null,
+              origin_scopes:
+                input.origin?.kind === "dynamic_client_registration" && input.originScopes != null
+                  ? input.originScopes.join(" ")
+                  : null,
               created_at: now,
             }),
           );
@@ -1288,7 +1300,13 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
     /** Redirect URI the candidate registered with the AS; null for rows
      *  predating the column. */
     readonly redirectUri: string | null;
+    /** Scopes the candidate registered for; null for rows predating the column. */
+    readonly scopes: readonly string[] | null;
   };
+
+  /** The scopes a DCR registration for `input` asks for. */
+  const dcrRegistrationScopes = (input: RegisterDynamicClientInput): readonly string[] =>
+    dedupeScopes([...input.scopes, ...additionalAuthorizationLifecycleScopes(input)]);
 
   // `oauth_client.created_at` is a date column that surfaces as a Date, an ISO
   // string, or an epoch number depending on the storage backend. Normalize to
@@ -1338,6 +1356,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                   resource: row.resource == null ? null : String(row.resource),
                   redirectUri:
                     row.origin_redirect_uri == null ? null : String(row.origin_redirect_uri),
+                  scopes: parseStoredScopes(row.origin_scopes),
                   createdAt: candidateCreatedAt(row.created_at),
                 },
               ];
@@ -1354,10 +1373,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                 a.createdAt - b.createdAt || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0),
             )
             .map(
-              ({ slug, resource, redirectUri }): DcrReuseCandidate => ({
+              ({ slug, resource, redirectUri, scopes }): DcrReuseCandidate => ({
                 slug,
                 resource,
                 redirectUri,
+                scopes,
               }),
             );
         }),
@@ -1388,6 +1408,21 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         if (hasExplicitRedirectUri) return false;
         return candidate.redirectUri === null || flowRedirectUri === null;
       };
+      // A client is reusable only when its registration covers every scope this
+      // one asks for: a server may refuse an authorize request for a scope the
+      // client was not registered for, and a server that has since added scopes
+      // would otherwise reject every reconnect through the old client. A row
+      // with no recorded scopes is not proof of coverage.
+      const registrationScopes = dcrRegistrationScopes(input);
+      const scopesCovered = (candidate: DcrReuseCandidate): boolean => {
+        const registered = candidate.scopes;
+        if (registrationScopes.length === 0) return true;
+        return (
+          registered !== null && registrationScopes.every((scope) => registered.includes(scope))
+        );
+      };
+      const reusableFor = (candidate: DcrReuseCandidate): boolean =>
+        redirectMatches(candidate) && scopesCovered(candidate);
       // A fresh registration must never take a slug an existing candidate
       // holds: `createClient` deletes any colliding (owner, slug) row first,
       // which would clobber a client that live connections still refresh
@@ -1403,7 +1438,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         // reconnects must reuse that instead of registering another duplicate
         // each time.
         const reusable = candidates.find(
-          (client) => client.resource === resource && redirectMatches(client),
+          (client) => client.resource === resource && reusableFor(client),
         );
         if (reusable) {
           return { existingSlug: reusable.slug, registrationSlug: reusable.slug };
@@ -1423,9 +1458,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       // resource-less flow (its tokens are bound to that resource), so when only
       // resource-scoped candidates exist we register a fresh resource-less client
       // rather than silently borrowing one (the old `?? candidates[0]` bug).
-      const reusable = candidates.find(
-        (client) => client.resource === null && redirectMatches(client),
-      );
+      const reusable = candidates.find((client) => client.resource === null && reusableFor(client));
       if (reusable) return { existingSlug: reusable.slug, registrationSlug: reusable.slug };
       // Fresh resource-less client. Its slug is the bare `dcr-<host>` base, but
       // the FIRST resource-scoped registration for an issuer also takes that base
@@ -1460,10 +1493,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         });
       }
       const authMethod = pickDcrAuthMethod(input.tokenEndpointAuthMethodsSupported);
-      const registrationScopes = dedupeScopes([
-        ...input.scopes,
-        ...additionalAuthorizationLifecycleScopes(input),
-      ]);
+      const registrationScopes = dcrRegistrationScopes(input);
       const information = yield* registerDynamicClientDcr(
         {
           registrationEndpoint: input.registrationEndpoint,
@@ -1503,8 +1533,8 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       // store "" so the PKCE-only token exchange omits `client_secret`.
       // Confidential DCR clients keep the returned secret in the credential
       // provider. The persisted grant is interactive authorization_code.
-      // `input.scopes` was already sent to the AS at registration above; the
-      // stored client carries no scope set (the integration drives requests).
+      // The integration drives what a flow requests; the registered scopes
+      // are recorded only as the bound of what the server will accept.
       yield* createClient({
         owner: input.owner,
         slug,
@@ -1520,6 +1550,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         },
         originIssuer: issuer,
         originRedirectUri: flowRedirectUri,
+        originScopes: registrationScopes,
       });
       return slug;
     });
@@ -1647,6 +1678,10 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           const tokenEndpointAuthMethod = parseStoredTokenEndpointAuthMethod(
             row.token_endpoint_auth_method,
           );
+          const registeredScopes =
+            parseOAuthClientOrigin(row).kind === "dynamic_client_registration"
+              ? parseStoredScopes(row.origin_scopes)
+              : null;
           if (tokenEndpointAuthMethod === null) {
             return Effect.fail(
               new StorageError({
@@ -1687,6 +1722,9 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
               clientSecret,
               resource: row.resource == null ? null : String(row.resource),
               ...(tokenEndpointAuthMethod === undefined ? {} : { tokenEndpointAuthMethod }),
+              ...(registeredScopes === null || registeredScopes.length === 0
+                ? {}
+                : { registeredScopes }),
             } satisfies LoadedOAuthClient;
           });
         }),
@@ -1790,7 +1828,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           ),
         );
       const firstParty = firstPartyFlow ? firstPartyBySlug.get(String(input.client)) : undefined;
-      const requestedScopes =
+      const unboundedScopes =
         scopePolicy.kind === "discover"
           ? yield* (() => {
               // Scope discovery reads protected-resource metadata. The client's
@@ -1816,6 +1854,30 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
               );
             })()
           : dedupeScopes(scopePolicy.scopes);
+
+      // A DCR client's registration bounds what its server will authorize, so
+      // never ask for a scope outside it. Discovered scopes are narrowed to the
+      // registration, the same way a scope-limited first-party app narrows
+      // them; declared scopes the integration needs fail here with a clear
+      // error instead of an opaque `invalid_scope` from the server.
+      const registeredScopes = client.registeredScopes;
+      const requestedScopes =
+        registeredScopes === undefined
+          ? unboundedScopes
+          : scopePolicy.kind === "discover"
+            ? unboundedScopes.filter((scope) => registeredScopes.includes(scope))
+            : unboundedScopes;
+      if (registeredScopes !== undefined) {
+        const unregistered = requestedScopes.filter((scope) => !registeredScopes.includes(scope));
+        if (unregistered.length > 0) {
+          return yield* new OAuthStartError({
+            message:
+              `OAuth app ${input.client} was registered without the scopes ` +
+              `${unregistered.join(", ")}, which ${input.integration} requests. ` +
+              `Reconnect to register an app with those scopes.`,
+          });
+        }
+      }
 
       // An explicitly scope-limited first-party app is an authorization
       // boundary, not picker decoration. Endpoint matching and provider
