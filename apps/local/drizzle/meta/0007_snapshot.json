@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ccdfb606-c5fd-4f3c-8296-2667eb31cd1a",
+  "id": "8037cf3d-eb52-4f29-aa94-63b614909837",
   "prevId": "89a4fd1b-f0f6-4482-a991-0db78c859f76",
   "tables": {
     "blob": {
@@ -474,6 +474,13 @@
         },
         "origin_redirect_uri": {
           "name": "origin_redirect_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "origin_requested_scopes": {
+          "name": "origin_requested_scopes",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

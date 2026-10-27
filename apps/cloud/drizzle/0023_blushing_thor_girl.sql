@@ -1,1 +1,0 @@
-ALTER TABLE "oauth_client" ADD COLUMN "origin_scopes" text;

@@ -1,5 +1,5 @@
 {
-  "id": "f8434522-4dec-4ec3-a98d-7835dd9ed956",
+  "id": "dd2a6125-3d4a-4dd1-85db-3c6a9aa7c8d7",
   "prevId": "9d3bc667-63af-4a1b-99d9-b490ffcd80ef",
   "version": "7",
   "dialect": "postgresql",
@@ -1136,6 +1136,12 @@
         },
         "origin_redirect_uri": {
           "name": "origin_redirect_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "origin_requested_scopes": {
+          "name": "origin_requested_scopes",
           "type": "text",
           "primaryKey": false,
           "notNull": false

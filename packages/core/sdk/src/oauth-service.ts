@@ -571,8 +571,9 @@ interface LoadedOAuthClient {
   readonly resource: string | null;
   readonly tokenEndpointAuthMethod?: TokenEndpointAuthMethod;
   readonly tokenRequestFormat?: "form" | "json";
-  /** The scopes a DCR client registered for, when its registration recorded
-   *  any. A server may refuse an authorize request for a scope outside them. */
+  /** The scopes the server registered a DCR client for, when its registration
+   *  response said. A server may refuse an authorize request for a scope
+   *  outside them. */
   readonly registeredScopes?: readonly string[];
 }
 
@@ -1053,6 +1054,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                 input.origin?.kind === "dynamic_client_registration"
                   ? (input.originRedirectUri ?? null)
                   : null,
+              origin_requested_scopes:
+                input.origin?.kind === "dynamic_client_registration" &&
+                input.originRequestedScopes != null
+                  ? input.originRequestedScopes.join(" ")
+                  : null,
               origin_scopes:
                 input.origin?.kind === "dynamic_client_registration" && input.originScopes != null
                   ? input.originScopes.join(" ")
@@ -1300,7 +1306,10 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
     /** Redirect URI the candidate registered with the AS; null for rows
      *  predating the column. */
     readonly redirectUri: string | null;
-    /** Scopes the candidate registered for; null for rows predating the column. */
+    /** Scopes the candidate's registration asked for; null for rows predating
+     *  the column. */
+    readonly requestedScopes: readonly string[] | null;
+    /** Scopes the server registered the candidate for; null when unknown. */
     readonly scopes: readonly string[] | null;
   };
 
@@ -1356,6 +1365,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                   resource: row.resource == null ? null : String(row.resource),
                   redirectUri:
                     row.origin_redirect_uri == null ? null : String(row.origin_redirect_uri),
+                  requestedScopes: parseStoredScopes(row.origin_requested_scopes),
                   scopes: parseStoredScopes(row.origin_scopes),
                   createdAt: candidateCreatedAt(row.created_at),
                 },
@@ -1373,10 +1383,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                 a.createdAt - b.createdAt || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0),
             )
             .map(
-              ({ slug, resource, redirectUri, scopes }): DcrReuseCandidate => ({
+              ({ slug, resource, redirectUri, requestedScopes, scopes }): DcrReuseCandidate => ({
                 slug,
                 resource,
                 redirectUri,
+                requestedScopes,
                 scopes,
               }),
             );
@@ -1408,17 +1419,22 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         if (hasExplicitRedirectUri) return false;
         return candidate.redirectUri === null || flowRedirectUri === null;
       };
-      // A client is reusable only when its registration covers every scope this
-      // one asks for: a server may refuse an authorize request for a scope the
-      // client was not registered for, and a server that has since added scopes
-      // would otherwise reject every reconnect through the old client. A row
-      // with no recorded scopes is not proof of coverage.
+      // A client is reusable only when its registration asked for, or was
+      // granted, every scope this one asks for: a server may refuse an
+      // authorize request for a scope the client was not registered for, and a
+      // server that has since added scopes would otherwise reject every
+      // reconnect through the old client. Coverage counts what the
+      // registration ASKED for, so a server that narrows registrations is not
+      // asked again on every reconnect for scopes it will never register. A
+      // row with no recorded request is not proof of coverage.
       const registrationScopes = dcrRegistrationScopes(input);
       const scopesCovered = (candidate: DcrReuseCandidate): boolean => {
-        const registered = candidate.scopes;
         if (registrationScopes.length === 0) return true;
-        return (
-          registered !== null && registrationScopes.every((scope) => registered.includes(scope))
+        const requested = candidate.requestedScopes;
+        if (requested === null) return false;
+        const registered = candidate.scopes ?? [];
+        return registrationScopes.every(
+          (scope) => requested.includes(scope) || registered.includes(scope),
         );
       };
       const reusableFor = (candidate: DcrReuseCandidate): boolean =>
@@ -1550,7 +1566,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         },
         originIssuer: issuer,
         originRedirectUri: flowRedirectUri,
-        originScopes: registrationScopes,
+        originRequestedScopes: registrationScopes,
+        // RFC 7591 §3.2.1: the response carries what the server registered,
+        // which may differ from what was asked for.
+        originScopes:
+          information.scope === undefined ? null : information.scope.split(/\s+/).filter(Boolean),
       });
       return slug;
     });
@@ -1872,9 +1892,8 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         if (unregistered.length > 0) {
           return yield* new OAuthStartError({
             message:
-              `OAuth app ${input.client} was registered without the scopes ` +
-              `${unregistered.join(", ")}, which ${input.integration} requests. ` +
-              `Reconnect to register an app with those scopes.`,
+              `The authorization server registered OAuth app ${input.client} without ` +
+              `the scopes ${unregistered.join(", ")}, which ${input.integration} requests.`,
           });
         }
       }
